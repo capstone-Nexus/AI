@@ -1,0 +1,8 @@
+streamlit
+streamlit-webrtc
+opencv-python
+mediapipe
+numpy
+pandas
+scipy
+requests
