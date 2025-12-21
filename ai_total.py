@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import joblib
@@ -10,18 +11,13 @@ import os
 # =========================================================
 # 0) 모델 경로 (환경변수로 덮어쓰기 가능)
 # =========================================================
-SURVEY_MODEL_PATH = os.getenv(
-    "SURVEY_MODEL_PATH",
-    "/Users/parktaeyun/Desktop/문서 모음집/2학년2학기캡스톤/code/models/adhd_pipe_smote.pkl"
-)
-CAT_MODEL_PATH = os.getenv(
-    "CAT_MODEL_PATH",
-    "/Users/parktaeyun/Desktop/문서 모음집/2학년2학기캡스톤/code/models/cat_late_fusion_model.pkl"
-)
-FUSION_MODEL_PATH = os.getenv(
-    "FUSION_MODEL_PATH",
-    "/Users/parktaeyun/Desktop/문서 모음집/2학년2학기캡스톤/code/models/meta_fusion_model.pkl"
-)
+
+
+BASE_DIR = Path(__file__).resolve().parent
+
+SURVEY_MODEL_PATH = os.getenv("SURVEY_MODEL_PATH", str(BASE_DIR / "models" / "adhd_pipe_smote.pkl"))
+CAT_MODEL_PATH    = os.getenv("CAT_MODEL_PATH",    str(BASE_DIR / "models" / "cat_late_fusion_model.pkl"))
+FUSION_MODEL_PATH = os.getenv("FUSION_MODEL_PATH", str(BASE_DIR / "models" / "meta_fusion_model.pkl"))
 
 
 def safe_load_model(path: str):
