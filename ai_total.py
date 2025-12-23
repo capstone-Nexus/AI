@@ -1,5 +1,4 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any
 from pathlib import Path
@@ -22,6 +21,9 @@ def safe_load_model(path: str):
     return joblib.load(path)
 
 def proba_of_adhd(model, X: pd.DataFrame) -> float:
+    """
+    model.classes_ 기준으로 ADHD(label=1)의 확률을 정확히 반환
+    """
     proba = model.predict_proba(X)[0]
     classes = list(model.classes_)
     if 1 not in classes:
@@ -30,28 +32,20 @@ def proba_of_adhd(model, X: pd.DataFrame) -> float:
     return float(proba[idx])
 
 # =========================================================
-# 1) 설정
+# 1) 설정(여기 두 개가 제일 중요)
 # =========================================================
-SURVEY_FEATURE_MODE = os.getenv("SURVEY_FEATURE_MODE", "sum")
-CAT_SCORE_MODE = os.getenv("CAT_SCORE_MODE", "mix")
+# 설문 모델이 학습한 입력 스케일과 동일하게 맞춰야 함
+# - "sum": (각 요인 합계) => 보통 10문항이면 10~60, 20문항이면 10~60/또는 10~60 각각
+# - "0to100": 0~100 정규화 점수
+SURVEY_FEATURE_MODE = os.getenv("SURVEY_FEATURE_MODE", "sum")  # "sum" or "0to100"
+
+# CAT 점수 산출 방식 (프론트 표시용)
+CAT_SCORE_MODE = os.getenv("CAT_SCORE_MODE", "mix")  # "aq" / "correct_rate" / "mix"
 
 # =========================================================
 # 2) FastAPI
 # =========================================================
 app = FastAPI(title="ADHD Prediction API")
-
-# ✅ CORS 설정 (추가된 부분)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://acts-front.vercel.app",
-        "http://localhost:3000",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 MODELS: Dict[str, Any] = {}
 
 @app.on_event("startup")
@@ -74,19 +68,19 @@ class Trial(BaseModel):
 
 class WMTrial(BaseModel):
     trial_index: int
-    type: str
+    type: str  # "forward" / "backward"
     presented: List[int]
     user_answer: List[int]
     correct: bool
 
 class Survey(BaseModel):
-    answers: Dict[str, int]
+    answers: Dict[str, int] = Field(..., description="q1~q20 각 1~6 점수")
     full4_iq: float
 
 class UserInfo(BaseModel):
     user_id: Optional[str] = None
     age: int
-    gender: int
+    gender: int  # 0=여, 1=남
     test_id: Optional[str] = None
 
 class CatRaw(BaseModel):
