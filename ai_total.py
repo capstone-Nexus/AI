@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any
 from pathlib import Path
@@ -12,24 +13,13 @@ import os
 # =========================================================
 BASE_DIR = Path(__file__).resolve().parent
 SURVEY_MODEL_PATH = os.getenv("SURVEY_MODEL_PATH", str(BASE_DIR / "models" / "adhd_pipe_smote.pkl"))
-CAT_MODEL_PATH    = os.getenv("CAT_MODEL_PATH",    str(BASE_DIR / "models" / "cat_model_no_psurvey_retrained.pkl"))
+CAT_MODEL_PATH    = os.getenv("CAT_MODEL_PATH",    str(BASE_DIR / "models" / "cat_late_fusion_model.pkl"))
 FUSION_MODEL_PATH = os.getenv("FUSION_MODEL_PATH", str(BASE_DIR / "models" / "meta_fusion_model.pkl"))
 
 def safe_load_model(path: str):
     if not os.path.exists(path):
         raise FileNotFoundError(f"모델 파일이 존재하지 않음: {path}")
     return joblib.load(path)
-
-def proba_of_adhd(model, X: pd.DataFrame) -> float:
-    """
-    model.classes_ 기준으로 ADHD(label=1)의 확률을 정확히 반환
-    """
-    proba = model.predict_proba(X)[0]
-    classes = list(model.classes_)
-    if 1 not in classes:
-        raise ValueError(f"모델 classes_에 ADHD(1)가 없음: {classes}")
-    idx = classes.index(1)
-    return float(proba[idx])
 
 # =========================================================
 # 1) 설정(여기 두 개가 제일 중요)
@@ -46,6 +36,19 @@ CAT_SCORE_MODE = os.getenv("CAT_SCORE_MODE", "mix")  # "aq" / "correct_rate" / "
 # 2) FastAPI
 # =========================================================
 app = FastAPI(title="ADHD Prediction API")
+
+# CORS 설정
+origins = [
+    "http://localhost:3000",
+    "https://acts-front.vercel.app"
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 MODELS: Dict[str, Any] = {}
 
 @app.on_event("startup")
@@ -288,7 +291,7 @@ def predict(payload: RequestPayload):
             "p_survey": p_survey
         }
         cat_X = pd.DataFrame([cat_row], columns=CAT_COLS)
-        p_cat = proba_of_adhd(cat_model, cat_X)
+        p_cat = float(cat_model.predict_proba(cat_X)[0][1])
 
         # C) Fusion -> p_final
         fusion_row = {
