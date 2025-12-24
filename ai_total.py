@@ -37,6 +37,19 @@ CAT_SCORE_MODE = os.getenv("CAT_SCORE_MODE", "mix")  # "aq" / "correct_rate" / "
 # =========================================================
 app = FastAPI(title="ADHD Prediction API")
 
+# 고정된 CAT 점수 반환용 GET 엔드포인트
+@app.get("/cat_scores_100")
+def get_cat_scores_100():
+    return {
+        "cat_scores_100": {
+            "simple": 26,
+            "sustained": 40,
+            "interference": 24,
+            "divided": 25,
+            "working_memory": 67
+        }
+    }
+
 # CORS 설정
 origins = [
     "http://localhost:3000",
