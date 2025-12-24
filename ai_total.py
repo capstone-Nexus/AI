@@ -22,22 +22,24 @@ def safe_load_model(path: str):
     return joblib.load(path)
 
 # =========================================================
-# 1) 설정(여기 두 개가 제일 중요)
+# 1) 설정
 # =========================================================
-# 설문 모델이 학습한 입력 스케일과 동일하게 맞춰야 함
-# - "sum": (각 요인 합계) => 보통 10문항이면 10~60, 20문항이면 10~60/또는 10~60 각각
-# - "0to100": 0~100 정규화 점수
 SURVEY_FEATURE_MODE = os.getenv("SURVEY_FEATURE_MODE", "sum")  # "sum" or "0to100"
-
-# CAT 점수 산출 방식 (프론트 표시용)
 CAT_SCORE_MODE = os.getenv("CAT_SCORE_MODE", "mix")  # "aq" / "correct_rate" / "mix"
+
+# CAT 과신 완화(옵션)
+# - "none": 보정 안 함
+# - "cap": 상한 캡 (default)
+# - "soft": 소프트 스케일링
+P_CAT_ADJUST_MODE = os.getenv("P_CAT_ADJUST_MODE", "cap")  # "none" / "cap" / "soft"
+P_CAT_CAP = float(os.getenv("P_CAT_CAP", "0.85"))          # cap 모드일 때 상한
+P_CAT_SOFT_SCALE = float(os.getenv("P_CAT_SOFT_SCALE", "0.6"))  # soft 모드일 때 0.0~1.0
 
 # =========================================================
 # 2) FastAPI
 # =========================================================
 app = FastAPI(title="ADHD Prediction API")
 
-# 고정된 CAT 점수 반환용 GET 엔드포인트
 @app.get("/cat_scores_100")
 def get_cat_scores_100():
     return {
@@ -50,10 +52,9 @@ def get_cat_scores_100():
         }
     }
 
-# CORS 설정
 origins = [
-    "http://localhost:3000/",
-    "https://acts-front.vercel.app/"
+    "http://localhost:3000",
+    "https://acts-front.vercel.app"
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -62,6 +63,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 MODELS: Dict[str, Any] = {}
 
 @app.on_event("startup")
@@ -137,7 +139,7 @@ FUSION_COLS = [
 ]
 
 # =========================================================
-# 5) 유틸: 설문 검증 + 점수화(20문항 -> 요약)
+# 5) 유틸: 설문 검증 + 점수화
 # =========================================================
 def validate_survey_answers(answers: Dict[str, int]) -> None:
     missing = [f"q{i}" for i in range(1, 21) if f"q{i}" not in answers]
@@ -153,10 +155,6 @@ def to_0_100_from_sum(raw_sum: float, n_items: int, min_scale=1, max_scale=6) ->
     return float(np.clip((raw_sum - min_sum) / (max_sum - min_sum) * 100.0, 0.0, 100.0))
 
 def compute_survey_features(answers: Dict[str, int]) -> Dict[str, float]:
-    """
-    프론트 q1~q20 -> (inatt, hyper)을 만들어 SURVEY_FEATURE_MODE에 맞춰 반환
-    """
-    # 그룹핑: (현재 FastAPI 로직 기준) q1~q10 부주의, q11~q20 과잉/충동
     inatt_vals = [float(answers[f"q{i}"]) for i in range(1, 11)]
     hyper_vals = [float(answers[f"q{i}"]) for i in range(11, 21)]
 
@@ -232,19 +230,28 @@ def compute_aq(om: float, com: float, w1: float, w2: float) -> float:
     v = 1 - w1 * om - w2 * com
     return float(np.clip(v, 0, 1))
 
-# CAT 점수(표시용) 0~100
 def score_100(aq: float, correct_rate: float, mode: str) -> int:
     if mode == "aq":
         return int(round(aq * 100))
     if mode == "correct_rate":
         return int(round(correct_rate * 100))
-    # mix: AQ 70% + 정답률 30% (표시용 임의 가중)
     v = 0.7 * aq + 0.3 * correct_rate
     return int(round(float(np.clip(v, 0, 1)) * 100))
 
 def wm_score_100(wm_f: float, wm_b: float) -> int:
     v = 0.5 * wm_f + 0.5 * wm_b
     return int(round(float(np.clip(v, 0, 1)) * 100))
+
+def adjust_p_cat(p_cat_raw: float) -> float:
+    """Fusion에 넣을 p_cat 보정값"""
+    if P_CAT_ADJUST_MODE == "none":
+        return float(np.clip(p_cat_raw, 0.0, 1.0))
+    if P_CAT_ADJUST_MODE == "soft":
+        # 0.5 중심으로 과신 완화 (scale < 1이면 0.5로 수렴)
+        v = 0.5 + (p_cat_raw - 0.5) * P_CAT_SOFT_SCALE
+        return float(np.clip(v, 0.0, 1.0))
+    # default: cap
+    return float(min(max(p_cat_raw, 0.0), P_CAT_CAP))
 
 # =========================================================
 # 7) 엔드포인트
@@ -253,13 +260,17 @@ def wm_score_100(wm_f: float, wm_b: float) -> int:
 def predict(payload: RequestPayload):
     try:
         survey_model = MODELS["survey"]
-        cat_model = MODELS["cat"]
         fusion_model = MODELS["fusion"]
+
+        cat_model_bundle = MODELS["cat"]
+        if isinstance(cat_model_bundle, dict) and "model" in cat_model_bundle:
+            cat_model = cat_model_bundle["model"]
+        else:
+            cat_model = cat_model_bundle
 
         # A) Survey -> p_survey
         answers = payload.survey.answers
         validate_survey_answers(answers)
-
         sf = compute_survey_features(answers)
 
         survey_row = {
@@ -284,7 +295,6 @@ def predict(payload: RequestPayload):
         aq_inter  = compute_aq(i_om,  i_com,  0.8519097689, 0.8812066974)
         aq_div    = compute_aq(d_om,  d_com,  0.8752559235, 0.8557618929)
 
-        # 표시용 점수
         cat_scores = {
             "simple": score_100(aq_simple, s_cr, CAT_SCORE_MODE),
             "sustained": score_100(aq_sust, su_cr, CAT_SCORE_MODE),
@@ -303,12 +313,30 @@ def predict(payload: RequestPayload):
             "aq_simple_sel": aq_simple, "aq_sustained": aq_sust, "aq_interference": aq_inter, "aq_divided": aq_div,
             "p_survey": p_survey
         }
-        cat_X = pd.DataFrame([cat_row], columns=CAT_COLS)
-        p_cat = float(cat_model.predict_proba(cat_X)[0][1])
 
-        # C) Fusion -> p_final
+        cat_X = pd.DataFrame([cat_row])
+
+        # feature 순서 맞추기
+        if hasattr(cat_model, "feature_names_in_"):
+            cat_X = cat_X.reindex(columns=list(cat_model.feature_names_in_))
+        elif isinstance(cat_model_bundle, dict) and "feature_names" in cat_model_bundle:
+            cat_X = cat_X.reindex(columns=list(cat_model_bundle["feature_names"]))
+        else:
+            cat_X = cat_X.reindex(columns=CAT_COLS)
+
+        # 누락 컬럼(NaN) 체크
+        if cat_X.isnull().any().any():
+            missing_cols = cat_X.columns[cat_X.isnull().any()].tolist()
+            raise HTTPException(status_code=500, detail=f"cat_X에 NaN 발생(컬럼 누락 가능): {missing_cols}")
+
+        # ✅ 먼저 raw p_cat 계산
+        p_cat_raw = float(cat_model.predict_proba(cat_X)[0][1])
+        # ✅ 그 다음 보정
+        p_cat_used = adjust_p_cat(p_cat_raw)
+
+        # C) Fusion -> p_final  (✅ fusion에는 보정값 사용)
         fusion_row = {
-            "p_survey": p_survey, "p_cat": p_cat,
+            "p_survey": p_survey, "p_cat": p_cat_used,
             "simple_sel_omission": s_om, "simple_sel_commission": s_com, "simple_sel_rt_mean": s_rt_m, "simple_sel_rt_sd": s_rt_s, "simple_sel_correct_rate": s_cr,
             "sustained_omission": su_om, "sustained_commission": su_com, "sustained_rt_mean": su_rt_m, "sustained_rt_sd": su_rt_s, "sustained_correct_rate": su_cr,
             "interference_omission": i_om, "interference_commission": i_com, "interference_rt_mean": i_rt_m, "interference_rt_sd": i_rt_s, "interference_correct_rate": i_cr,
@@ -325,11 +353,14 @@ def predict(payload: RequestPayload):
 
         return {
             "p_survey": round(p_survey, 4),
-            "p_cat": round(p_cat, 4),
+
+            # raw / used 둘 다 제공 (프론트에서 선택 가능)
+            "p_cat_raw": round(p_cat_raw, 4),
+            "p_cat_used": round(p_cat_used, 4),
+
             "p_final": round(p_final, 4),
             "label_final": label_final,
 
-            # 설문 요약(프론트가 표시 가능)
             "survey_summary": {
                 "mode_used_for_model": SURVEY_FEATURE_MODE,
                 "inatt_sum": round(sf["inatt_sum"], 3),
@@ -338,8 +369,14 @@ def predict(payload: RequestPayload):
                 "hyper_0to100": round(sf["hyper_0to100"], 3),
             },
 
-            # CAT 점수(0~100)
             "cat_scores_100": cat_scores,
+
+            # 디버깅용(원하면 제거 가능)
+            "p_cat_adjust": {
+                "mode": P_CAT_ADJUST_MODE,
+                "cap": P_CAT_CAP,
+                "soft_scale": P_CAT_SOFT_SCALE,
+            }
         }
 
     except HTTPException:
