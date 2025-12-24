@@ -52,8 +52,8 @@ def get_cat_scores_100():
 
 # CORS 설정
 origins = [
-    "http://localhost:3000",
-    "https://acts-front.vercel.app"
+    "http://localhost:3000/",
+    "https://acts-front.vercel.app/"
 ]
 app.add_middleware(
     CORSMiddleware,
